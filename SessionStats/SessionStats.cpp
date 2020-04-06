@@ -36,6 +36,7 @@ std::string INIT_PLAYLISTS = "Function TAGame.GFxData_Matchmaking_TA.InitPlaylis
 std::string DESTROY_CLASS = "Function Engine.ScriptGroup_ORS.DestroyClass";
 std::string TAB_CHANGED = "Function TAGame.GFxData_Matchmaking_TA.SetMatchmakingViewTab";
 std::string FINISH_MATCH = "Function TAGame.GFxShell_TA.LeaveMatch";
+std::string BEGIN_SEARCH = "Function OnlineGameMatchmakingBase_X.Searching.BeginState";
 
 //#include <sysinfoapi.h>
 BAKKESMOD_PLUGIN(SessionStatsPlugin, "Session Stats plugin", "1.04", 0)
@@ -63,13 +64,14 @@ void SessionStatsPlugin::onLoad() {
 
 	// hook events - still need to handle "rage quit" case
 	gameWrapper->HookEvent(BEGIN_STATE, bind(&SessionStatsPlugin::updateCurrentPlaylist, this, std::placeholders::_1));
+	gameWrapper->HookEvent(FINISH_MATCH, bind(&SessionStatsPlugin::updateSkillData, this, std::placeholders::_1));
+	gameWrapper->HookEvent(BEGIN_SEARCH, bind(&SessionStatsPlugin::updateSkillData, this, std::placeholders::_1));
 	gameWrapper->HookEventPost(UPDATE_SKILL_DATA, bind(&SessionStatsPlugin::updateSkillData, this, std::placeholders::_1));
 
 	gameWrapper->HookEvent(INIT_PLAYLISTS, bind(&SessionStatsPlugin::setPlaylistMenuOpened, this, std::placeholders::_1));
 	gameWrapper->HookEvent(DESTROY_CLASS, bind(&SessionStatsPlugin::setPlaylistMenuOpened, this, std::placeholders::_1));
 	gameWrapper->HookEventWithCaller<ServerWrapper>(TAB_CHANGED,
 		bind(&SessionStatsPlugin::setMatchmakingViewTab, this, std::placeholders::_1, std::placeholders::_2, std::placeholders::_3));
-	gameWrapper->HookEvent(FINISH_MATCH, bind(&SessionStatsPlugin::updateSkillData, this, std::placeholders::_1));
 
 	gameWrapper->RegisterDrawable(bind(&SessionStatsPlugin::RenderCanvas, this, std::placeholders::_1));
 }
@@ -78,6 +80,11 @@ void SessionStatsPlugin::onUnload() {
 	gameWrapper->UnregisterDrawables();
 	gameWrapper->UnhookEvent(BEGIN_STATE);
 	gameWrapper->UnhookEvent(UPDATE_SKILL_DATA);
+	gameWrapper->UnhookEvent(BEGIN_SEARCH);
+	gameWrapper->UnhookEvent(FINISH_MATCH);
+	gameWrapper->UnhookEvent(INIT_PLAYLISTS);
+	gameWrapper->UnhookEvent(DESTROY_CLASS);
+	gameWrapper->UnhookEvent(TAB_CHANGED);
 }
 
 bool SessionStatsPlugin::isReady() {
@@ -112,9 +119,7 @@ void SessionStatsPlugin::setPlaylistMenuOpened(std::string eventName) {
 }
 
 void SessionStatsPlugin::setMatchmakingViewTab(ServerWrapper caller, void* params, std::string eventName) {
-	int tab = *(unsigned char*)params;
-	currentTab = tab;
-
+	currentTab = *(unsigned char*)params;
 	cvarManager->log("Changed tabs to " + std::to_string(currentTab));
 }
 
@@ -172,7 +177,11 @@ void SessionStatsPlugin::updateSkillData(std::string eventName) {
 	}
 }
 
-void SessionStatsPlugin::drawPlaylist(CanvasWrapper& canvas) {
+void SessionStatsPlugin::RenderCanvas(CanvasWrapper canvas) {
+	if (!pluginWindow->ShouldDisplayOnMenu() || gameWrapper->IsInGame()
+		|| !playlistMenuOpened || currentTab == 0)
+		return;
+
 	for (int i = 0; i < 4; i++) {
 		int playlist = TAB_PLAYLISTS[currentTab][i];
 		float delta = getMMRDelta(playlist);
@@ -190,15 +199,6 @@ void SessionStatsPlugin::drawPlaylist(CanvasWrapper& canvas) {
 		canvas.SetPosition(pos);
 		canvas.DrawString(str);
 	}
-}
-
-void SessionStatsPlugin::RenderCanvas(CanvasWrapper canvas) {
-	if (!pluginWindow->ShouldDisplayOnMenu() || gameWrapper->IsInGame() || !playlistMenuOpened)
-		return;
-	if (currentTab == 0)
-		return;
-
-	drawPlaylist(canvas);
 }
 
 void SessionStatsPlugin::reset() {

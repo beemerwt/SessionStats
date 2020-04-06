@@ -73,7 +73,5 @@ public:
 	void updateSteamID();
 	void updateSkillData(std::string eventName);
 
-	void drawPlaylist(CanvasWrapper&);
-
 	void reset();
 };
