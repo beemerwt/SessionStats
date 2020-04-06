@@ -14,361 +14,200 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 */
 
 #include "SessionStats.h"
+#include "SessionStatsWindow.h"
 #include "utils/parser.h"
 #include "bakkesmod/wrappers/GameEvent/ServerWrapper.h"
 #include "bakkesmod/wrappers/MMRWrapper.h"
+#include "bakkesmod/wrappers/GuiManagerWrapper.h"
+#include "bakkesmod/wrappers/gamewrapper.h"
 
+#include <string>
 #include <sstream>
 #include <map>
 #include <set>
 #include <fstream>
+#include <math.h>
 
-#define NEW_METHOD
+#define DEBUG
+
+std::string UPDATE_SKILL_DATA = "Function TAGame.GFxData_Playlist_TA.UpdateSkillData";
+std::string BEGIN_STATE = "Function GameEvent_TA.Countdown.BeginState";
+std::string INIT_PLAYLISTS = "Function TAGame.GFxData_Matchmaking_TA.InitPlaylists";
+std::string DESTROY_CLASS = "Function Engine.ScriptGroup_ORS.DestroyClass";
+std::string TAB_CHANGED = "Function TAGame.GFxData_Matchmaking_TA.SetMatchmakingViewTab";
+std::string FINISH_MATCH = "Function TAGame.GFxShell_TA.LeaveMatch";
 
 //#include <sysinfoapi.h>
 BAKKESMOD_PLUGIN(SessionStatsPlugin, "Session Stats plugin", "1.04", 0)
 
-
 void SessionStatsPlugin::onLoad() {
+	pluginWindow = new SessionStatsWindow(this);
+	log = std::bind(&CVarManagerWrapper::log, cvarManager, std::placeholders::_1);
+	getGuiStyle = std::bind(&GuiManagerWrapper::GetImGuiStyle, gameWrapper->GetGUIManager());
 
+#ifdef DEBUG
 	// log startup to console
 	std::stringstream ss;
 	ss << exports.pluginName << " version: " << exports.pluginVersion;
 	cvarManager->log(ss.str());
-
-	teamNumber = -1;
-
-	// create cvars
-	cvarManager->registerCvar("cl_sessionstats_obs_output", "0", "Output text stats to files to be used as OBS sources", true, true, 0, true, 1, true); 
-	cvarManager->registerCvar("cl_sessionstats_obs_directory", "bakkesmod/data", "Directory to write OBS text output files to (use forward slash '/' as separator in path", true, false, (0.0F), false, (0.0F), true); //.bindTo(obsDir);
-	cvarManager->registerCvar("cl_sessionstats_display_stats", "0", "Display session stats on screen", true, true, 0, true, 1, true);
-	cvarManager->registerCvar("cl_sessionstats_display_toast", "0", "Display toast popup after a match", true, true, 0, true, 1, true);
+#endif
 
 	// hook cvars
 	cvarManager->registerNotifier("cl_sessionstats_reset", [this](std::vector<string> params) {
-		ResetStats();
+		reset();
 	}, "Start a fresh stats session", PERMISSION_ALL);
-	cvarManager->getCvar("cl_sessionstats_obs_output").addOnValueChanged(std::bind(&SessionStatsPlugin::logStatusToConsole, this, std::placeholders::_1, std::placeholders::_2));
-	cvarManager->getCvar("cl_sessionstats_obs_directory").addOnValueChanged(std::bind(&SessionStatsPlugin::logStatusToConsole, this, std::placeholders::_1, std::placeholders::_2));
-	cvarManager->getCvar("cl_sessionstats_display_stats").addOnValueChanged(std::bind(&SessionStatsPlugin::logStatusToConsole, this, std::placeholders::_1, std::placeholders::_2));
-
 
 	// init state
 	currentPlaylist = -1;
-	ResetStats();
+	reset();
 
 	// hook events - still need to handle "rage quit" case
-	gameWrapper->HookEvent("Function GameEvent_TA.Countdown.BeginState", bind(&SessionStatsPlugin::StartGame, this, std::placeholders::_1));
-	gameWrapper->HookEvent("Function TAGame.GameEvent_Soccar_TA.OnMatchWinnerSet", bind(&SessionStatsPlugin::EndGame, this, std::placeholders::_1));
-	//gameWrapper->HookEvent("Function TAGame.GameEvent_Soccar_TA.Destroyed", bind(&SessionStatsPlugin::EndGame, this, std::placeholders::_1));
-	//gameWrapper->HookEvent("Function TAGame.GameEvent_Soccar_TA.EventMatchEnded", bind(&SessionStatsPlugin::EndGame, this, std::placeholders::_1));
-	gameWrapper->HookEventPost("Function TAGame.OnlineGame_TA.OnMainMenuOpened", bind(&SessionStatsPlugin::onMainMenu, this, std::placeholders::_1));
-	gameWrapper->RegisterDrawable(std::bind(&SessionStatsPlugin::Render, this, std::placeholders::_1));
+	gameWrapper->HookEvent(BEGIN_STATE, bind(&SessionStatsPlugin::updateCurrentPlaylist, this, std::placeholders::_1));
+	gameWrapper->HookEventPost(UPDATE_SKILL_DATA, bind(&SessionStatsPlugin::updateSkillData, this, std::placeholders::_1));
+
+	gameWrapper->HookEvent(INIT_PLAYLISTS, bind(&SessionStatsPlugin::setPlaylistMenuOpened, this, std::placeholders::_1));
+	gameWrapper->HookEvent(DESTROY_CLASS, bind(&SessionStatsPlugin::setPlaylistMenuOpened, this, std::placeholders::_1));
+	gameWrapper->HookEventWithCaller<ServerWrapper>(TAB_CHANGED,
+		bind(&SessionStatsPlugin::setMatchmakingViewTab, this, std::placeholders::_1, std::placeholders::_2, std::placeholders::_3));
+	gameWrapper->HookEvent(FINISH_MATCH, bind(&SessionStatsPlugin::updateSkillData, this, std::placeholders::_1));
+
+	gameWrapper->RegisterDrawable(bind(&SessionStatsPlugin::RenderCanvas, this, std::placeholders::_1));
 }
 
-void SessionStatsPlugin::ResetStats() {
-	stats.clear();
-	if (cvarManager->getCvar("cl_sessionstats_obs_output").getBoolValue())
-		writeStats();
+void SessionStatsPlugin::onUnload() {
+	gameWrapper->UnregisterDrawables();
+	gameWrapper->UnhookEvent(BEGIN_STATE);
+	gameWrapper->UnhookEvent(UPDATE_SKILL_DATA);
 }
 
-void SessionStatsPlugin::onMainMenu(std::string eventName) {
-	cvarManager->log("=======Main Menu=======");
-	cvarManager->log("=======================");
-	updateStats(5);
+bool SessionStatsPlugin::isReady() {
+	return gameWrapper != nullptr;
 }
-void SessionStatsPlugin::StartGame(std::string eventName) {
-	cvarManager->log("====BeginState==============================");
 
+int SessionStatsPlugin::getWins(int playlist) {
+	return stats[playlist].wins;
+}
+
+int SessionStatsPlugin::getLosses(int playlist) {
+	return stats[playlist].losses;
+}
+
+int SessionStatsPlugin::getStreak(int playlist) {
+	return stats[playlist].streak;
+}
+
+float SessionStatsPlugin::getMMRDelta(int playlist) {
+	return stats[playlist].currentMMR - stats[playlist].initialMMR;
+}
+
+float SessionStatsPlugin::getMMR(int playlist) {
+	return stats[playlist].currentMMR;
+}
+
+void SessionStatsPlugin::setPlaylistMenuOpened(std::string eventName) {
+	if (eventName == INIT_PLAYLISTS)
+		playlistMenuOpened = true;
+	else if (eventName == DESTROY_CLASS)
+		playlistMenuOpened = false;
+}
+
+void SessionStatsPlugin::setMatchmakingViewTab(ServerWrapper caller, void* params, std::string eventName) {
+	int tab = *(unsigned char*)params;
+	currentTab = tab;
+
+	cvarManager->log("Changed tabs to " + std::to_string(currentTab));
+}
+
+void SessionStatsPlugin::updateCurrentPlaylist(std::string eventName) {
 	if (!gameWrapper->IsInOnlineGame() || gameWrapper->IsInReplay())
 		return;
 
-	mySteamID.ID = gameWrapper->GetSteamID();
-	cvarManager->log("SteamID: " + std::to_string(mySteamID.ID));
-
 	ServerWrapper sw = gameWrapper->GetOnlineGame();
+	if (sw.IsNull() || !sw.IsOnlineMultiplayer())
+		return;
 
-	if (!sw.IsNull() && sw.IsOnlineMultiplayer()) {
-		CarWrapper me = gameWrapper->GetLocalCar();
-		stringstream ss;
+	MMRWrapper mw = gameWrapper->GetMMRWrapper();
 
-		if (!me.IsNull()) {
-			teamNumber = me.GetTeamNum2();
-			ss << "Player is on team " << teamNumber;
-		}
-		else {
-			teamNumber = -1;
-			ss << "Team number not found yet!";
-		}
-		cvarManager->log(ss.str());
-		MMRWrapper mw = gameWrapper->GetMMRWrapper();
+	// Ensure we're only getting playlists whose stats we're keeping track of
+	if (stats.find(mw.GetCurrentPlaylist()) != stats.end())
 		currentPlaylist = mw.GetCurrentPlaylist();
-		float mmr = mw.GetPlayerMMR(mySteamID, currentPlaylist);
-		if (stats.find(currentPlaylist) == stats.end()) 
-			stats[currentPlaylist] = StatsStruct { mmr, mmr, 0, 0, 0, 0, 0 };
-		
-		ss.clear();
-		ss << "steamID: " << std::to_string(mySteamID.ID) << " MMR: " << mmr << " currentPlaylist: " << currentPlaylist;
-		cvarManager->log(ss.str());
-		if (cvarManager->getCvar("cl_sessionstats_obs_output").getBoolValue())
-			writeStats();
-	}
-	else {
-		cvarManager->log("ServerWrapper is NULL?");
-	}
 }
 
+void SessionStatsPlugin::updateSteamID() {
+	mySteamID = { gameWrapper->GetSteamID() };
+}
 
-void SessionStatsPlugin::EndGame(std::string eventName) {
-#ifdef NEW_METHOD
-	std::stringstream ss;
-	ss << "===EndGame=== currentPlaylist:" << currentPlaylist << "==================================  ";
-	cvarManager->log(ss.str());
-	if (teamNumber == -1) { // we couldn't find the team number, try one last time, though localcar seems to always be null at this point
-		CarWrapper me = gameWrapper->GetLocalCar();
-		if (!me.IsNull())
-			teamNumber = me.GetTeamNum2();
-	}
+void SessionStatsPlugin::updateSkillData(std::string eventName) {
+	updateSteamID();
+	MMRWrapper mmrWrapper = gameWrapper->GetMMRWrapper();
 
-	ServerWrapper sw = gameWrapper->GetOnlineGame();
-	if (!sw.IsNull()) {
-		ArrayWrapper<TeamWrapper> teams = sw.GetTeams();
-		if (teams.Count() == 2) {
-			ArrayWrapper<PriWrapper> players0 = teams.Get(0).GetMembers();
-			ArrayWrapper<PriWrapper> players1 = teams.Get(1).GetMembers();
-			int score0 = teams.Get(0).GetScore();
-			int score1 = teams.Get(1).GetScore();
-			if ((score0 > score1 && teamNumber == 0) || (score1 > score0 && teamNumber == 1)) {
-				// log win
-				stats[currentPlaylist].wins++;
-				if (stats[currentPlaylist].streak < 0)
-					stats[currentPlaylist].streak = 1;
-				else
-					stats[currentPlaylist].streak++;
-			}
-			else {
-				// log loss
-				stats[currentPlaylist].losses++;
-				if (stats[currentPlaylist].streak > 0)
-					stats[currentPlaylist].streak = -1;
-				else
-					stats[currentPlaylist].streak--;
-			}
+	for (int i = NUM_RANKED_MODES - 1; i >= 0; i--) {
+		int playlist = RANKED_PLAYLIST[i];
+		float mmr = mmrWrapper.GetPlayerMMR(mySteamID, playlist);
+		if (stats[playlist].initialMMR == -1) {
+			// (MMR) Initial, Current, Last, etc...
+			cvarManager->log("Initial MMR was -1");
+			stats[playlist].initialMMR = mmr;
+			stats[playlist].currentMMR = mmr;
+			stats[playlist].lastMMR = mmr;
+			continue;
 		}
-		else {
-			ss.clear();
-			ss << " Wrong num of teams: " << teams.Count();
-			cvarManager->log(ss.str());
+
+		stats[playlist].currentMMR = mmr;
+		if (stats[playlist].currentMMR > stats[playlist].lastMMR) {
+			stats[playlist].wins += 1;
+			if (stats[currentPlaylist].streak < 0)
+				stats[currentPlaylist].streak = 1;
+			else
+				stats[currentPlaylist].streak++;
 		}
+		else if (stats[playlist].currentMMR < stats[playlist].lastMMR) {
+			if (stats[currentPlaylist].streak > 0)
+				stats[currentPlaylist].streak = -1;
+			else
+				stats[currentPlaylist].streak--;
+			stats[playlist].losses += 1;
+		}
+		stats[playlist].lastMMR = mmr;
 	}
-	else {
-		cvarManager->log("server is null?");
-	}
-
-
-#endif
-	teamNumber = -1;
-	updateStats(5);
 }
 
-void SessionStatsPlugin::updateStats(int retryCount) {
-	ServerWrapper sw = gameWrapper->GetOnlineGame();
+void SessionStatsPlugin::drawPlaylist(CanvasWrapper& canvas) {
+	for (int i = 0; i < 4; i++) {
+		int playlist = TAB_PLAYLISTS[currentTab][i];
+		float delta = getMMRDelta(playlist);
 
-	if (sw.IsNull() || !sw.IsOnlineMultiplayer() || gameWrapper->IsInReplay())
+		std::stringstream ss;
+		ss << std::setprecision(2) << std::fixed << delta;
+		std::string str = ss.str();
+		int width = str.length() * 4;
+
+		if (delta > 0)
+			canvas.SetColor(0, 255, 0, 255);
+		else
+			canvas.SetColor(255, 0, 0, 255);
+		Vector2 pos = { TAB_POS[i].X - width, 350 };
+		canvas.SetPosition(pos);
+		canvas.DrawString(str);
+	}
+}
+
+void SessionStatsPlugin::RenderCanvas(CanvasWrapper canvas) {
+	if (!pluginWindow->ShouldDisplayOnMenu() || gameWrapper->IsInGame() || !playlistMenuOpened)
+		return;
+	if (currentTab == 0)
 		return;
 
-	std::stringstream ss;
-	ss << "===updateStats==================================  " << retryCount;
-	cvarManager->log(ss.str());
-
-	if (retryCount > 20 || retryCount < 0)
-		return;
-
-	if (stats.count(currentPlaylist) != 0) {
-		cvarManager->log("Updating current playlist");
-		gameWrapper->SetTimeout([retryCount,this](GameWrapper* gameWrapper) {
-			bool gotNewMMR = false;
-			float mmr = -1.0f;
-			bool writeObs = cvarManager->getCvar("cl_sessionstats_obs_output").getBoolValue();
-			while (!gotNewMMR) {
-				std::stringstream ss2;
-				if (1 || (gameWrapper->GetMMRWrapper().IsSynced(mySteamID, currentPlaylist) && !gameWrapper->GetMMRWrapper().IsSyncing(mySteamID))) {
-					mmr = gameWrapper->GetMMRWrapper().GetPlayerMMR(mySteamID, currentPlaylist);
-					ss2 << "Retry Count: " << retryCount << " Got updated MMR " << mmr << " old MMR was: " << stats[currentPlaylist].currentMMR;
-					cvarManager->log(ss2.str());
-
-					if (mmr > stats[currentPlaylist].currentMMR) {
-						stats[currentPlaylist].currentMMR = mmr;
-#ifndef NEW_METHOD
-						stats[currentPlaylist].wins++;
-						if (stats[currentPlaylist].streak < 0)
-							stats[currentPlaylist].streak = 1;
-						else
-							stats[currentPlaylist].streak++;
-#endif /*NEW_METHOD */
-						gotNewMMR = true;
-					}
-					else if (mmr < stats[currentPlaylist].currentMMR) {
-						stats[currentPlaylist].currentMMR = mmr;
-#ifndef NEW_METHOD
-						stats[currentPlaylist].losses++;
-						if (stats[currentPlaylist].streak > 0)
-							stats[currentPlaylist].streak = -1;
-						else
-							stats[currentPlaylist].streak--;
-#endif /* NEW_METHOD */
-						gotNewMMR = true;
-					}
-				}
-				if (!gotNewMMR && retryCount > 0)
-					gameWrapper->SetTimeout([retryCount, this](GameWrapper* gameWrapper) {
-						this->updateStats(retryCount - 1);
-					}, 0.5f);
-				else {
-					stringstream statstring;
-					statstring << "Wins: " << stats[currentPlaylist].wins << " Losses: " << stats[currentPlaylist].losses << " Streak: " << stats[currentPlaylist].streak;
-					gameWrapper->Toast("SessionStats", statstring.str());
-				}
-			}
-#ifdef NEW_METHOD /* always write stats */
-			if (1) {
-#else
-			if (gotNewMMR) {
-#endif /* NEW_METHOD */
-
-				std::stringstream ss;
-				ss << "writeObs: " << writeObs << " write to: " << cvarManager->getCvar("cl_sessionstats_obs_directory").getStringValue();
-				cvarManager->log(ss.str());
-				if (writeObs)
-					writeStats();
-			}
-			//ss.clear();
-			//ss << "======== w:" << stats[currentPlaylist].wins << " l:" << stats[currentPlaylist].losses << " MMR: " << (stats[currentPlaylist].currentMMR - stats[currentPlaylist].initialMMR) << " currentPlaylist: " << currentPlaylist;
-			//cvarManager->log(ss.str());
-			//cvarManager->log("================================================");
-
-		}, 3);
-	}
-	else {
-		cvarManager->log("Current Playlist MMR not stored?");
-	}
+	drawPlaylist(canvas);
 }
 
-static int writeIntFile(const std::string & fn, int val) {
-	std::ofstream ofs(fn, std::ofstream::out);
-	if (!ofs) return 0;
-	ofs << val;
-	if (!ofs) return 0;
-	ofs.close();
-	return 1; 
-}
-static int writeFloatFile(const std::string & fn, float val) {
-	std::ofstream ofs(fn, std::ofstream::out);
-	if (!ofs) return 0;
-	ofs << val;
-	if (!ofs) return 0;
-	ofs.close();
-	return 1;
-}
-
-void SessionStatsPlugin::writeStats() {
-	std::stringstream ss;
-	
-	std::string obsDir = cvarManager->getCvar("cl_sessionstats_obs_directory").getStringValue();
-	if (obsDir == "") // if field is empty, write to current directory inside RL folder
-		obsDir = ".";
-	std::string::size_type pos = 0u;
-	while ((pos = obsDir.find("/", pos)) != std::string::npos) {
-		obsDir.replace(pos, 1, "\\");
-		pos += 1;
+void SessionStatsPlugin::reset() {
+	for (int i = NUM_RANKED_MODES - 1; i >= 0; i--) {
+		stats[RANKED_PLAYLIST[i]].initialMMR = -1;
+		stats[RANKED_PLAYLIST[i]].lastMMR = 0;
+		stats[RANKED_PLAYLIST[i]].currentMMR = 0;
+		stats[RANKED_PLAYLIST[i]].wins = 0;
+		stats[RANKED_PLAYLIST[i]].losses = 0;
+		stats[RANKED_PLAYLIST[i]].streak = 0;
 	}
-
-	ss << "Writing file to " << obsDir + "\\wins.txt";
-	cvarManager->log(ss.str());
-	if (stats.find(currentPlaylist) == stats.end()) {
-
-		writeIntFile(obsDir + "\\wins.txt", 0) &&
-		writeIntFile(obsDir + "\\losses.txt", 0) &&
-		writeIntFile(obsDir + "\\streak.txt", 0) &&
-		writeFloatFile(obsDir + "\\mmrChange.txt", 0.0f);
-		return;
-	}
-	writeIntFile(obsDir + "\\wins.txt", stats[currentPlaylist].wins) &&
-	writeIntFile(obsDir + "\\losses.txt", stats[currentPlaylist].losses) &&
-	writeIntFile(obsDir + "\\streak.txt", stats[currentPlaylist].streak) &&
-	writeFloatFile(obsDir + "\\mmrChange.txt", stats[currentPlaylist].currentMMR - stats[currentPlaylist].initialMMR);
-
-}
-
-
-void SessionStatsPlugin::Render(CanvasWrapper canvas) {
-	bool screenOut = cvarManager->getCvar("cl_sessionstats_display_stats").getBoolValue();
-	if (!(screenOut))
-		return;
-	static int count = 0, delta = 1;
-#define STEP 5
-	count += STEP;
-	if (count < STEP)
-		delta = 1;
-	if (count > (255 - STEP))
-		delta = -STEP;
-
-	int w, l, s;
-	float mmrDelta;
-	if (currentPlaylist != -1 && (stats.find(currentPlaylist) != stats.end())) {
-		w = stats[currentPlaylist].wins;
-		l = stats[currentPlaylist].losses;
-		s = stats[currentPlaylist].streak;
-		mmrDelta = stats[currentPlaylist].currentMMR - stats[currentPlaylist].initialMMR;
-	}
-	else {
-		w = l = s = 0;
-		mmrDelta = 0.0f;
-	}
-#define SPACER 200
-	Vector2 sz = canvas.GetSize();
-	canvas.SetColor(0, 255, 0, 255);
-	canvas.SetPosition(Vector2{ 50,sz.Y-350 });
-	canvas.DrawString("Wins: " + std::to_string(w),3,3);
-
-	canvas.SetColor(255, 0, 0, 255);
-	canvas.SetPosition(Vector2{ 50, sz.Y-300 });
-	canvas.DrawString("Losses: " + std::to_string(l),3,3);
-
-	canvas.SetColor(0, 0, 255, 255);
-	canvas.SetPosition(Vector2{ 50, sz.Y-250 });
-	std::string streak = "Streak :";
-	streak += ((s > 0) ? "+" : "");
-	streak += std::to_string(s);
-	canvas.DrawString(streak, 3,3);
-
-	canvas.SetColor(255, 0, 0, 255);
-	canvas.SetPosition(Vector2{ 50, sz.Y - 200 });
-	canvas.DrawString("MMR +/-: " + std::to_string(mmrDelta), 3, 3);
-
-	canvas.SetColor(255, count, 255-count, 255);
-	canvas.SetPosition(Vector2{ 50, sz.Y - 150 });
-
-	// lol credits
-	//canvas.DrawString("PLUGIN BY MEGASPLAT" + s, 10, 10);
-	//canvas.SetPosition(Vector2{ (int)(maxx / 2.0f + yaw / 2.0 * (float)(maxx - minx)), (int)(maxy / 2.0f + pitch / 2.0 * (float)(maxy - miny)) });
-	//canvas.DrawLine(Vector2{ (int)(maxx / 2.0f), (int)(maxy / 2.0f) }, Vector2{ (int)(maxx / 2.0f + yaw /2.0 * (float)(maxx - maxy)), (int)(maxy / 2.0f + pitch /2.0 * (float)(maxy - miny)) });
-	//canvas.DrawBox(Vector2{ 10, 10 });
-	// draw second box
-}
-
-void SessionStatsPlugin::logStatusToConsole(std::string oldValue, CVarWrapper cvar) {
-	std::stringstream ss;
-	ss << "cl_sessionstats_obs_directory: '" << cvarManager->getCvar("cl_sessionstats_obs_directory").getStringValue() << 
-		"' cl_sessionstats_display_stats: " << cvarManager->getCvar("cl_sessionstats_display_stats").getBoolValue() <<
-		" cl_sessionstats_obs_output: " << cvarManager->getCvar("cl_sessionstats_obs_output").getBoolValue();
-	cvarManager->log(ss.str());
-}
-
-void SessionStatsPlugin::onUnload()
-{
-	//  TODO: call gameWrapper->UnhookEvent() for events?
-	gameWrapper->UnregisterDrawables();
-	gameWrapper->UnhookEvent("Function GameEvent_TA.Countdown.BeginState");
-	gameWrapper->UnhookEvent("Function TAGame.GameEvent_Soccar_TA.Destroyed");
 }
