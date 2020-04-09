@@ -23,17 +23,17 @@ typedef struct {
 	float initialMMR, currentMMR, lastMMR;
 	int wins, losses, streak;
 	int tier, div;
-} StatsStruct;
+} Playlist;
 
 class SessionStatsPlugin : public BakkesMod::Plugin::BakkesModPlugin, public BakkesMod::Plugin::PluginWindow
 {
 private:
 	SessionStatsWindow* pluginWindow;
 		
-	std::map<int, StatsStruct> stats;
+	std::map<int, Playlist> playlists;
 	int currentPlaylist;
 	SteamID mySteamID;
-	int teamNumber, currentTab;
+	int currentTab;
 	bool playlistMenuOpened = false;
 
 	std::string GetMenuName() override { return pluginWindow->GetMenuName(); }
@@ -58,7 +58,6 @@ public:
 	virtual void onLoad();
 	virtual void onUnload();
 
-
 	bool isReady();
 	int getWins(int playlist);
 	int getLosses(int playlist);
@@ -70,7 +69,6 @@ public:
 	void setMatchmakingViewTab(ServerWrapper caller, void* params, std::string eventName);
 
 	void updateCurrentPlaylist(std::string eventName);
-	void updateSteamID();
 	void updateSkillData(std::string eventName);
 
 	void reset();

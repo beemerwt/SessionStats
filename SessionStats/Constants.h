@@ -1,5 +1,10 @@
 #pragma once
 // Playlist IDs
+const int STANDARD = 3;
+const int DOUBLES = 2;
+const int DUEL = 1;
+const int CHAOS = 4;
+
 const int RANKED_STANDARD = 13;
 const int RANKED_DOUBLES = 11;
 const int RANKED_SOLO_DUEL = 10;
@@ -10,20 +15,11 @@ const int DROPSHOT = 29;
 const int HOOPS = 27;
 const int SNOW_DAY = 30;
 
-const int NUM_RANKED_MODES = 8;
-const int RANKED_PLAYLIST[NUM_RANKED_MODES] = {
-	RANKED_STANDARD,
-	RANKED_DOUBLES,
-	RANKED_SOLO_DUEL,
-	RANKED_SOLO_STANDARD,
-	RUMBLE,
-	DROPSHOT,
-	HOOPS,
-	SNOW_DAY
-};
+const int NUM_TABS = 3;
+const int NUM_PLAYLIST = 4;
 
-const int TAB_PLAYLISTS[3][4] = {
-	{ 0, 0, 0, 0 },
+const int PLAYLISTS[NUM_TABS][NUM_PLAYLIST] = {
+	{ STANDARD, DOUBLES, DUEL, CHAOS },
 	{ RANKED_STANDARD, RANKED_DOUBLES, RANKED_SOLO_DUEL, RANKED_SOLO_STANDARD },
 	{ RUMBLE, DROPSHOT, HOOPS, SNOW_DAY }
 };

@@ -38,8 +38,7 @@ std::string TAB_CHANGED = "Function TAGame.GFxData_Matchmaking_TA.SetMatchmaking
 std::string FINISH_MATCH = "Function TAGame.GFxShell_TA.LeaveMatch";
 std::string BEGIN_SEARCH = "Function OnlineGameMatchmakingBase_X.Searching.BeginState";
 
-//#include <sysinfoapi.h>
-BAKKESMOD_PLUGIN(SessionStatsPlugin, "Session Stats plugin", "1.04", 0)
+BAKKESMOD_PLUGIN(SessionStatsPlugin, "Session Stats", "2.0", 7)
 
 void SessionStatsPlugin::onLoad() {
 	pluginWindow = new SessionStatsWindow(this);
@@ -92,23 +91,23 @@ bool SessionStatsPlugin::isReady() {
 }
 
 int SessionStatsPlugin::getWins(int playlist) {
-	return stats[playlist].wins;
+	return playlists[playlist].wins;
 }
 
 int SessionStatsPlugin::getLosses(int playlist) {
-	return stats[playlist].losses;
+	return playlists[playlist].losses;
 }
 
 int SessionStatsPlugin::getStreak(int playlist) {
-	return stats[playlist].streak;
+	return playlists[playlist].streak;
 }
 
 float SessionStatsPlugin::getMMRDelta(int playlist) {
-	return stats[playlist].currentMMR - stats[playlist].initialMMR;
+	return playlists[playlist].currentMMR - playlists[playlist].initialMMR;
 }
 
 float SessionStatsPlugin::getMMR(int playlist) {
-	return stats[playlist].currentMMR;
+	return playlists[playlist].currentMMR;
 }
 
 void SessionStatsPlugin::setPlaylistMenuOpened(std::string eventName) {
@@ -132,82 +131,83 @@ void SessionStatsPlugin::updateCurrentPlaylist(std::string eventName) {
 		return;
 
 	MMRWrapper mw = gameWrapper->GetMMRWrapper();
-
 	// Ensure we're only getting playlists whose stats we're keeping track of
-	if (stats.find(mw.GetCurrentPlaylist()) != stats.end())
+	if (playlists.find(mw.GetCurrentPlaylist()) != playlists.end())
 		currentPlaylist = mw.GetCurrentPlaylist();
 }
 
-void SessionStatsPlugin::updateSteamID() {
-	mySteamID = { gameWrapper->GetSteamID() };
-}
-
 void SessionStatsPlugin::updateSkillData(std::string eventName) {
-	updateSteamID();
+	mySteamID = { gameWrapper->GetSteamID() };
 	MMRWrapper mmrWrapper = gameWrapper->GetMMRWrapper();
 
-	for (int i = NUM_RANKED_MODES - 1; i >= 0; i--) {
-		int playlist = RANKED_PLAYLIST[i];
-		float mmr = mmrWrapper.GetPlayerMMR(mySteamID, playlist);
-		if (stats[playlist].initialMMR == -1) {
-			// (MMR) Initial, Current, Last, etc...
-			cvarManager->log("Initial MMR was -1");
-			stats[playlist].initialMMR = mmr;
-			stats[playlist].currentMMR = mmr;
-			stats[playlist].lastMMR = mmr;
-			continue;
-		}
+	for (int i = NUM_TABS - 1; i >= 0; i--) {
+		for (int t = NUM_PLAYLIST - 1; t >= 0; t--) {
+			int n = PLAYLISTS[i][t];
+			float mmr = mmrWrapper.GetPlayerMMR(mySteamID, n);
+			if (playlists[n].initialMMR == -1) {
+				// (MMR) Initial, Current, Last, etc...
+				cvarManager->log("Initial MMR was -1");
+				playlists[n].initialMMR = mmr;
+				playlists[n].currentMMR = mmr;
+				playlists[n].lastMMR = mmr;
+				continue;
+			}
 
-		stats[playlist].currentMMR = mmr;
-		if (stats[playlist].currentMMR > stats[playlist].lastMMR) {
-			stats[playlist].wins += 1;
-			if (stats[currentPlaylist].streak < 0)
-				stats[currentPlaylist].streak = 1;
-			else
-				stats[currentPlaylist].streak++;
+			playlists[n].currentMMR = mmr;
+			if (playlists[n].currentMMR > playlists[n].lastMMR) {
+				playlists[n].wins += 1;
+				if (playlists[n].streak < 0)
+					playlists[n].streak = 1;
+				else
+					playlists[n].streak++;
+			}
+			else if (playlists[n].currentMMR < playlists[n].lastMMR) {
+				if (playlists[n].streak > 0)
+					playlists[n].streak = -1;
+				else
+					playlists[n].streak--;
+				playlists[n].losses += 1;
+			}
+			playlists[n].lastMMR = mmr;
+
 		}
-		else if (stats[playlist].currentMMR < stats[playlist].lastMMR) {
-			if (stats[currentPlaylist].streak > 0)
-				stats[currentPlaylist].streak = -1;
-			else
-				stats[currentPlaylist].streak--;
-			stats[playlist].losses += 1;
-		}
-		stats[playlist].lastMMR = mmr;
 	}
 }
 
+std::stringstream ss;
 void SessionStatsPlugin::RenderCanvas(CanvasWrapper canvas) {
-	if (!pluginWindow->ShouldDisplayOnMenu() || gameWrapper->IsInGame()
-		|| !playlistMenuOpened || currentTab == 0)
+	if (!pluginWindow->ShouldDisplayOnMenu() || gameWrapper->IsInGame() || !playlistMenuOpened)
 		return;
 
-	for (int i = 0; i < 4; i++) {
-		int playlist = TAB_PLAYLISTS[currentTab][i];
+	for (int i = 0; i < NUM_PLAYLIST; i++) {
+		int playlist = PLAYLISTS[currentTab][i];
 		float delta = getMMRDelta(playlist);
 
-		std::stringstream ss;
 		ss << std::setprecision(2) << std::fixed << delta;
 		std::string str = ss.str();
 		int width = str.length() * 4;
 
 		if (delta > 0)
-			canvas.SetColor(0, 255, 0, 255);
+			canvas.SetColor(0, 0xFF, 0, 0xFF);
 		else
-			canvas.SetColor(255, 0, 0, 255);
+			canvas.SetColor(0xFF, 0, 0, 0xFF);
 		Vector2 pos = { TAB_POS[i].X - width, 350 };
 		canvas.SetPosition(pos);
-		canvas.DrawString(str);
+		canvas.DrawString(str, 1.2, 1.2);
+		ss.str("");
 	}
 }
 
 void SessionStatsPlugin::reset() {
-	for (int i = NUM_RANKED_MODES - 1; i >= 0; i--) {
-		stats[RANKED_PLAYLIST[i]].initialMMR = -1;
-		stats[RANKED_PLAYLIST[i]].lastMMR = 0;
-		stats[RANKED_PLAYLIST[i]].currentMMR = 0;
-		stats[RANKED_PLAYLIST[i]].wins = 0;
-		stats[RANKED_PLAYLIST[i]].losses = 0;
-		stats[RANKED_PLAYLIST[i]].streak = 0;
+	for (int i = NUM_TABS - 1; i >= 0; i--) {
+		for (int t = NUM_PLAYLIST - 1; t >= 0; t--) {
+			int n = PLAYLISTS[i][t];
+			playlists[n].initialMMR = -1;
+			playlists[n].lastMMR = 0;
+			playlists[n].currentMMR = 0;
+			playlists[n].wins = 0;
+			playlists[n].losses = 0;
+			playlists[n].streak = 0;
+		}
 	}
 }
